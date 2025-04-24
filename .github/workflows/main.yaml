@@ -1,54 +1,72 @@
-name: 'Terraform'
+name: Deploy to Google Cloud
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    
-
-permissions:
-  contents: read
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy (e.g., dev, qa)'
+        required: true
+        default: 'dev'
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  deploy:
     runs-on: ubuntu-latest
-
-    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
-    defaults:
-      run:
-        shell: bash
+    environment: ${{ inputs.environment }}
+    env:
+      GCP_DEV_KEY_VAR: ${{ secrets.GCP_DEV_KEY }}  # Set the environment variable for the service account key
+      PROJECT_DEV: ${{ secrets.PROJECT_DEV }}  # Set the environment variable for the project ID
 
     steps:
-    # Checkout the repository to the GitHub Actions runner
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v2
 
-    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v1
-      with:
-        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ env.GCP_DEV_KEY_VAR }}  # Use the service account key from the environment variable
 
-    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
-    - name: Terraform Init
-      run: terraform init
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_DEV }}  # Use the project ID from the environment variable
 
-    # Checks that all Terraform configuration files adhere to a canonical format
-    - name: Terraform Format
-      run: terraform fmt -check
-      env:
-          GOOGLE_CREDENTIALS: ${{secrets.GCP_GIT_TOKEN}}
+      - name: Install dependencies for my-react-app-portal
+        run: |
+          cd ./my-react-app-portal
+          npm install
 
-    # Generates an execution plan for Terraform
-    - name: Terraform Plan
-      run: terraform plan -input=false
-      env:
-          GOOGLE_CREDENTIALS: ${{secrets.GCP_GIT_TOKEN}}
+      - name: Install dependencies for my-node-app-service
+        run: |
+          cd ./my-node-app-service
+          npm install
 
-      # On push to "main", build or change infrastructure according to Terraform configuration files
-      # Note: It is recommended to set up a required "strict" status check in your repository for "Terraform Cloud". See the documentation on "strict" required status checks for more information: https://help.github.com/en/github/administering-a-repository/types-of-required-status-checks
-    - name: Terraform Apply
-      run: terraform apply -auto-approve -input=false
-      env:
-          GOOGLE_CREDENTIALS: ${{secrets.GCP_GIT_TOKEN}}
+      - name: Update version with timestamp for my-react-app-portal
+        id: versioning-react-portal
+        run: |
+          cd my-react-app-portal
+          VERSION=$(node -p "require('./package.json').version")
+          TIMESTAMP=$(date -u +%Y%m%dT%H%M%S)
+          NEW_VERSION="${VERSION%%+*}+$TIMESTAMP"
+          node -e "let p=require('./package.json'); p.version='$NEW_VERSION'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2))"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update version with timestamp for my-node-app-service
+        id: versioning-node-service
+        run: |
+          cd my-node-app-service
+          VERSION=$(node -p "require('./package.json').version")
+          TIMESTAMP=$(date -u +%Y%m%dT%H%M%S)
+          NEW_VERSION="${VERSION%%+*}+$TIMESTAMP"
+          node -e "let p=require('./package.json'); p.version='$NEW_VERSION'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2))"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Deploy Application
+        run: |
+          chmod +x ./Installer/dev/appdeployerdev.sh
+          ./Installer/dev/appdeployerdev.sh -v ${{ steps.versioning-react-portal.outputs.new_version }} -s "all"
+
+      - name: Deploy to App Engine
+        uses: google-github-actions/deploy-appengine@v2
+        with:
+          project_id: ${{ env.PROJECT_DEV }}  # Pass the project ID from the environment variable
+          deliverables: app.yaml
